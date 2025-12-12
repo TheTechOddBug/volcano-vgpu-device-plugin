@@ -430,7 +430,7 @@ func (m *NvidiaDevicePlugin) Allocate(ctx context.Context, reqs *pluginapi.Alloc
 	}
 	nodename := os.Getenv("NODE_NAME")
 
-	// 找到Pod中的NodeName是当前节点且对应注解时间戳最老的pod，开始为该pod分配设备
+    // Find the pod scheduled on the current node with the oldest annotation timestamp, then allocate devices for the pod
 	gpuAmount := len(reqs.ContainerRequests[0].DevicesIDs)
 	current, err := util.GetPendingPod(nodename, gpuAmount)
 	if err != nil {

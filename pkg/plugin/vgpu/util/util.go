@@ -217,7 +217,7 @@ func DecodeContainerDevices(str string) (c ContainerDevices, count int) {
 			devcores, _ := strconv.ParseInt(tmpstr[3], 10, 32)
 			tmpdev.Usedcores = int32(devcores)
 			contdev = append(contdev, tmpdev)
-			klog.Infoln("val=", val)
+            klog.V(4).Infoln("val=", val)
 		}
 	}
 	//klog.V(4).Infoln("contdev=", contdev)
