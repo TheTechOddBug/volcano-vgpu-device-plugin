@@ -19,7 +19,6 @@ on:
   push:
     branches:
     - main
-    - dev-vgpu-1219
   pull_request_target:
     types:
     - opened
@@ -30,6 +29,15 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+    - name: Free disk space
+      # https://github.com/actions/virtual-environments/issues/709
+      run: |
+        echo "=========original CI disk space"
+        df -h
+        sudo rm -rf "/usr/local/share/boost"
+        sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+        echo "=========after clean up, the left CI disk space"
+        df -h
     - uses: actions/checkout@v2
     - uses: actions/setup-go@v2
       with:
