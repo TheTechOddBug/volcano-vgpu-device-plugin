@@ -430,7 +430,9 @@ func (m *NvidiaDevicePlugin) Allocate(ctx context.Context, reqs *pluginapi.Alloc
 	}
 	nodename := os.Getenv("NODE_NAME")
 
-	current, err := util.GetPendingPod(nodename)
+    // Find the pod scheduled on the current node with the oldest annotation timestamp, then allocate devices for the pod
+	gpuAmount := len(reqs.ContainerRequests[0].DevicesIDs)
+	current, err := util.GetPendingPod(nodename, gpuAmount)
 	if err != nil {
 		lock.ReleaseNodeLock(nodename, util.VGPUDeviceName)
 		return &pluginapi.AllocateResponse{}, err
@@ -440,10 +442,11 @@ func (m *NvidiaDevicePlugin) Allocate(ctx context.Context, reqs *pluginapi.Alloc
 		lock.ReleaseNodeLock(nodename, util.VGPUDeviceName)
 		return &pluginapi.AllocateResponse{}, errors.New("no pending pod found on node")
 	}
-
+	klog.V(3).InfoS("Current pending pod UID:", current.UID, "pod name", current.Name)
 	for idx := range reqs.ContainerRequests {
 		currentCtr, devreq, err := util.GetNextDeviceRequest(util.NvidiaGPUDevice, *current)
-		klog.V(3).InfoS("deviceAllocateFromAnnotation=", "request", devreq)
+		klog.V(4).InfoS("Selected Pod deviceAllocateFromAnnotation=", "request", devreq)
+		//klog.V(4).InfoS("reqs device ids=", "deviceIDs", reqs.ContainerRequests[idx].DevicesIDs)
 		if err != nil {
 			klog.Errorln("get device from annotation failed", err.Error())
 			util.PodAllocationFailed(nodename, current)

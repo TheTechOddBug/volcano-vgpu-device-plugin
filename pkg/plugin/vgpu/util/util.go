@@ -64,13 +64,13 @@ func GetNode(nodename string) (*v1.Node, error) {
 	return n, err
 }
 
-func GetPendingPod(node string) (*v1.Pod, error) {
+func GetPendingPod(node string, gpuAmount int) (*v1.Pod, error) {
 	podList, err := lock.GetClient().CoreV1().Pods("").List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
 
-	oldestPod := getOldestPod(podList.Items, node)
+	oldestPod := getOldestPod(podList.Items, node, gpuAmount)
 	if oldestPod == nil {
 		return nil, fmt.Errorf("cannot get valid pod")
 	}
@@ -78,22 +78,52 @@ func GetPendingPod(node string) (*v1.Pod, error) {
 	return oldestPod, nil
 }
 
-func getOldestPod(pods []v1.Pod, nodename string) *v1.Pod {
+//func printPodList(pods []v1.Pod, kubeletRequestAmount int) {
+//	for _, pod := range pods {
+//		_, length := DecodePodDevices(pod.Annotations[AssignedIDsToAllocateAnnotations])
+//		klog.V(4).Infof("pod %s, node %s, kubelet request %d, pod annotation gpu amount %d, annotations: %s", pod.Name,
+//			pod.Spec.NodeName, kubeletRequestAmount, length, pod.Annotations[AssignedIDsToAllocateAnnotations])
+//	}
+//}
+
+func getOldestPod(pods []v1.Pod, nodename string, gpuAmount int) *v1.Pod {
 	if len(pods) == 0 {
 		return nil
 	}
-	oldest := pods[0]
+	//printPodList(pods, gpuAmount)
+	var oldest v1.Pod
+	found := false
+	filteredPods := []v1.Pod{}
 	for _, pod := range pods {
 		if pod.Annotations[AssignedNodeAnnotations] == nodename {
-			klog.V(4).Infof("pod %s, predicate time: %s", pod.Name, pod.Annotations[AssignedTimeAnnotations])
-			if getPredicateTimeFromPodAnnotation(&oldest) > getPredicateTimeFromPodAnnotation(&pod) {
+			// Need to ensure that the pod being handled has the same number of devices as the node requesting
+			pdevices, deviceCount := DecodePodDevices(pod.Annotations[AssignedIDsToAllocateAnnotations])
+			klog.V(3).Infof("GetOldestPod -- Pod name: %s, Kubelet request gpuAmount %d, "+
+				"pod request gpuAmount %d", pod.Name, gpuAmount, len(pdevices))
+			if deviceCount == gpuAmount {
+				found = true
+				filteredPods = append(filteredPods, pod)
 				oldest = pod
 			}
 		}
 	}
-	klog.V(4).Infof("oldest pod %#v, predicate time: %#v", oldest.Name,
-		oldest.Annotations[AssignedTimeAnnotations])
-	return &oldest
+
+	//klog.V(4).Infof("filteredPods %v", filteredPods)
+
+	for _, pod := range filteredPods {
+		//klog.V(4).Infof("pod %s, predicate time: %s", pod.Name, pod.Annotations[AssignedTimeAnnotations])
+		if getPredicateTimeFromPodAnnotation(&oldest) > getPredicateTimeFromPodAnnotation(&pod) {
+			oldest = pod
+		}
+	}
+
+	if found {
+		klog.V(4).Infof("GetOldestPod -- oldest pod %#v, predicate time: %#v", oldest.Name,
+			oldest.Annotations[AssignedTimeAnnotations])
+		return &oldest
+	}
+	return nil
+
 }
 
 func getPredicateTimeFromPodAnnotation(pod *v1.Pod) uint64 {
@@ -153,9 +183,8 @@ func EncodeContainerDevices(cd ContainerDevices) string {
 	for _, val := range cd {
 		tmp += val.UUID + "," + val.Type + "," + strconv.Itoa(int(val.Usedmem)) + "," + strconv.Itoa(int(val.Usedcores)) + ":"
 	}
-	fmt.Println("Encoded container Devices=", tmp)
+	//klog.V(4).Infoln("Encoded container Devices=", tmp)
 	return tmp
-	//return strings.Join(cd, ",")
 }
 
 func EncodePodDevices(pd PodDevices) string {
@@ -166,18 +195,20 @@ func EncodePodDevices(pd PodDevices) string {
 	return strings.Join(ss, ";")
 }
 
-func DecodeContainerDevices(str string) ContainerDevices {
+func DecodeContainerDevices(str string) (c ContainerDevices, count int) {
+	deviceCount := 0
 	if len(str) == 0 {
-		return ContainerDevices{}
+		return ContainerDevices{}, 0
 	}
 	cd := strings.Split(str, ":")
 	contdev := ContainerDevices{}
 	tmpdev := ContainerDevice{}
 	if len(str) == 0 {
-		return contdev
+		return contdev, 0
 	}
 	for _, val := range cd {
 		if strings.Contains(val, ",") {
+			deviceCount++
 			tmpstr := strings.Split(val, ",")
 			tmpdev.UUID = tmpstr[0]
 			tmpdev.Type = tmpstr[1]
@@ -186,27 +217,31 @@ func DecodeContainerDevices(str string) ContainerDevices {
 			devcores, _ := strconv.ParseInt(tmpstr[3], 10, 32)
 			tmpdev.Usedcores = int32(devcores)
 			contdev = append(contdev, tmpdev)
+            klog.V(4).Infoln("val=", val)
 		}
 	}
-	return contdev
+	//klog.V(4).Infoln("contdev=", contdev)
+	return contdev, deviceCount
 }
 
-func DecodePodDevices(str string) PodDevices {
-	klog.Infoln("DecodePodDevices=", str)
+func DecodePodDevices(str string) (PodDevices, int) {
+	klog.V(4).Infoln("DecodePodDevices=", str)
+	length := 0
 	if len(str) == 0 {
-		return PodDevices{}
+		return PodDevices{}, 0
 	}
 	var pd PodDevices
 	for _, s := range strings.Split(str, ";") {
-		cd := DecodeContainerDevices(s)
+		cd, count := DecodeContainerDevices(s)
 		pd = append(pd, cd)
+		length += count
 	}
-	return pd
+	return pd, length
 }
 
 func GetNextDeviceRequest(dtype string, p v1.Pod) (v1.Container, ContainerDevices, error) {
-	pdevices := DecodePodDevices(p.Annotations[AssignedIDsToAllocateAnnotations])
-	klog.Infoln("pdevices=", pdevices, "p.name", p.Name, "annos", p.Annotations)
+	pdevices, _ := DecodePodDevices(p.Annotations[AssignedIDsToAllocateAnnotations])
+	klog.V(4).Infoln("pdevices=", pdevices, "p.name", p.Name, "annos", p.Annotations)
 	res := ContainerDevices{}
 	for idx, val := range pdevices {
 		found := false
@@ -224,7 +259,7 @@ func GetNextDeviceRequest(dtype string, p v1.Pod) (v1.Container, ContainerDevice
 }
 
 func EraseNextDeviceTypeFromAnnotation(dtype string, p v1.Pod) error {
-	pdevices := DecodePodDevices(p.Annotations[AssignedIDsToAllocateAnnotations])
+	pdevices, _ := DecodePodDevices(p.Annotations[AssignedIDsToAllocateAnnotations])
 	res := PodDevices{}
 	found := false
 	for _, val := range pdevices {
@@ -248,9 +283,9 @@ func EraseNextDeviceTypeFromAnnotation(dtype string, p v1.Pod) error {
 		}
 	}
 	klog.Infoln("After erase res=", res)
-	newannos := make(map[string]string)
-	newannos[AssignedIDsToAllocateAnnotations] = EncodePodDevices(res)
-	return PatchPodAnnotations(&p, newannos)
+	newAnnos := make(map[string]string)
+	newAnnos[AssignedIDsToAllocateAnnotations] = EncodePodDevices(res)
+	return PatchPodAnnotations(&p, newAnnos)
 }
 
 func PodAllocationTrySuccess(nodeName string, pod *v1.Pod) {
